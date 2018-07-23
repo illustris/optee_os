@@ -120,6 +120,8 @@ register_phys_mem_ul(MEM_AREA_TEE_ASAN, ASAN_MAP_PA, ASAN_MAP_SZ);
 register_phys_mem(MEM_AREA_TA_RAM, TA_RAM_START, TA_RAM_SIZE);
 register_phys_mem(MEM_AREA_NSEC_SHM, TEE_SHMEM_START, TEE_SHMEM_SIZE);
 
+register_phys_mem(MEM_AREA_RAM_NSEC, 0x40000000 /*0x80008000*/ /*DRAM0_BASE*/ /*0x80000000*/, 0x700000 /*0x100000*/);
+
 static bool _pbuf_intersects(struct memaccess_area *a, size_t alen,
 			     paddr_t pa, size_t size)
 {

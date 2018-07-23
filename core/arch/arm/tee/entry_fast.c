@@ -84,6 +84,10 @@ static void tee_entry_fastcall_l2cc_mutex(struct thread_smc_args *args)
 static void tee_entry_exchange_capabilities(struct thread_smc_args *args)
 {
 	bool dyn_shm_en = false;
+	unsigned short addr;
+	unsigned char *kptr;//, *endptr;
+	unsigned char tt, ss;
+	//int i;
 
 	/*
 	 * Currently we ignore OPTEE_SMC_NSEC_CAP_UNIPROCESSOR.
@@ -114,6 +118,42 @@ static void tee_entry_exchange_capabilities(struct thread_smc_args *args)
 #endif
 
 	IMSG("Dynamic shared memory is %sabled", dyn_shm_en ? "en" : "dis");
+
+	kptr = (unsigned char *)0x11d00000+(0x80101520 - 0x80000000);//0x11f00000..0x11f00fff 0x12001000-0x11f00000
+	//endptr = kptr + 0x700000;
+	//kptr += 0x8000;
+	IMSG("===========================================\n");
+	//for(i=0;i<0x100;i++)
+	addr = 0;
+	while(kptr < (unsigned char *)(0x11d00000+1000+(0x80101520 - 0x80000000)))
+	{
+		tt = (unsigned char)(kptr+0x4<(unsigned char *)(0x11b00000+1000+0x8000)?0x00:0x01);
+		ss = (0x04 + (unsigned char)(((addr>>8)&0x00ff) + (addr&0x00ff) + tt + *kptr + *(kptr+1) + *(kptr+2) + *(kptr+3)));
+		ss = ss ^ 0xff;
+		ss++;
+		//             ccaaaatt  xx  xx  xx  xx  ss
+		IMSG("HEXDUMP :04%04x%02x%02x%02x%02x%02x%02x",
+			addr,//aaaa
+			tt,//tt
+			*kptr,//xx
+			*(kptr+1),//xx
+			*(kptr+2),//xx
+			*(kptr+3),//xx
+			ss//ss
+			);
+		/*IMSG("HEXDUMP :04%04x%02x%02x%02x%02x%02x%02x",
+			addr,//aaaa
+			tt,//tt
+			*(kptr+3),//xx
+			*(kptr+2),//xx
+			*(kptr+1),//xx
+			*kptr,//xx
+			ss//ss
+			);*/
+		kptr+=0x4;
+		addr+=0x4;
+	}
+	IMSG("\n===========================================\n");
 }
 
 static void tee_entry_disable_shm_cache(struct thread_smc_args *args)
