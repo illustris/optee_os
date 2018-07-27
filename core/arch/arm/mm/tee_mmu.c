@@ -2,34 +2,10 @@
 /*
  * Copyright (c) 2016, Linaro Limited
  * Copyright (c) 2014, STMicroelectronics International N.V.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include <arm.h>
 #include <assert.h>
-#include <bitstring.h>
 #include <kernel/panic.h>
 #include <kernel/spinlock.h>
 #include <kernel/tee_common.h>
@@ -65,18 +41,6 @@
 
 #define TEE_MMU_UCACHE_DEFAULT_ATTR	(TEE_MATTR_CACHE_CACHED << \
 					 TEE_MATTR_CACHE_SHIFT)
-
-/*
- * Two ASIDs per context, one for kernel mode and one for user mode. ASID 0
- * and 1 are reserved and not used. This means a maximum of 31 loaded user
- * mode contexts. This value can be increased but not beyond the maximum
- * ASID, which is architecture dependent (max 255 for ARMv7-A and ARMv8-A
- * Aarch32).
- */
-#define MMU_NUM_ASIDS		64
-
-static bitstr_t bit_decl(g_asid, MMU_NUM_ASIDS);
-static unsigned int g_asid_spinlock = SPINLOCK_UNLOCK;
 
 static vaddr_t select_va_in_range(vaddr_t prev_end, uint32_t prev_attr,
 				  vaddr_t next_begin, uint32_t next_attr,
@@ -323,40 +287,6 @@ TEE_Result vm_set_prot(struct user_ta_ctx *utc, vaddr_t va, size_t len,
 	return TEE_ERROR_ITEM_NOT_FOUND;
 }
 
-static unsigned int asid_alloc(void)
-{
-	uint32_t exceptions = cpu_spin_lock_xsave(&g_asid_spinlock);
-	unsigned int r;
-	int i;
-
-	bit_ffc(g_asid, MMU_NUM_ASIDS, &i);
-	if (i == -1) {
-		r = 0;
-	} else {
-		bit_set(g_asid, i);
-		r = (i + 1) * 2;
-	}
-
-	cpu_spin_unlock_xrestore(&g_asid_spinlock, exceptions);
-	return r;
-}
-
-static void asid_free(unsigned int asid)
-{
-	uint32_t exceptions = cpu_spin_lock_xsave(&g_asid_spinlock);
-
-	/* Only even ASIDs are supposed to be allocated */
-	assert(!(asid & 1));
-
-	if (asid) {
-		int i = (asid - 1) / 2;
-
-		assert(i < MMU_NUM_ASIDS && bit_test(g_asid, i));
-		bit_clear(g_asid, i);
-	}
-
-	cpu_spin_unlock_xrestore(&g_asid_spinlock, exceptions);
-}
 
 static TEE_Result map_kinit(struct user_ta_ctx *utc __maybe_unused)
 {

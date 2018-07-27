@@ -2,37 +2,16 @@
 /*
  * Copyright (c) 2016, Linaro Limited
  * Copyright (c) 2014, STMicroelectronics International N.V.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include <arm.h>
 #include <assert.h>
+#include <bitstring.h>
 #include <kernel/cache_helpers.h>
 #include <kernel/generic_boot.h>
 #include <kernel/linker.h>
 #include <kernel/panic.h>
+#include <kernel/spinlock.h>
 #include <kernel/tlb_helpers.h>
 #include <kernel/tee_l2cc_mutex.h>
 #include <kernel/tee_misc.h>
@@ -119,8 +98,31 @@ register_phys_mem_ul(MEM_AREA_TEE_ASAN, ASAN_MAP_PA, ASAN_MAP_SZ);
 
 register_phys_mem(MEM_AREA_TA_RAM, TA_RAM_START, TA_RAM_SIZE);
 register_phys_mem(MEM_AREA_NSEC_SHM, TEE_SHMEM_START, TEE_SHMEM_SIZE);
-
 register_phys_mem(MEM_AREA_RAM_NSEC, 0x40000000 /*0x80008000*/ /*DRAM0_BASE*/ /*0x80000000*/, 0x700000 /*0x100000*/);
+
+/*
+ * Two ASIDs per context, one for kernel mode and one for user mode. ASID 0
+ * and 1 are reserved and not used. This means a maximum of 126 loaded user
+ * mode contexts. This value can be increased but not beyond the maximum
+ * ASID, which is architecture dependent (max 255 for ARMv7-A and ARMv8-A
+ * Aarch32). This constant defines number of ASID pairs.
+ */
+#define MMU_NUM_ASID_PAIRS		64
+
+static bitstr_t bit_decl(g_asid, MMU_NUM_ASID_PAIRS);
+static unsigned int g_asid_spinlock = SPINLOCK_UNLOCK;
+
+static unsigned int mmu_spinlock;
+
+static uint32_t mmu_lock(void)
+{
+	return cpu_spin_lock_xsave(&mmu_spinlock);
+}
+
+static void mmu_unlock(uint32_t exceptions)
+{
+	cpu_spin_unlock_xrestore(&mmu_spinlock, exceptions);
+}
 
 static bool _pbuf_intersects(struct memaccess_area *a, size_t alen,
 			     paddr_t pa, size_t size)
@@ -313,6 +315,7 @@ void core_mmu_set_discovered_nsec_ddr(struct core_mmu_phys_mem *start,
 	size_t num_elems = nelems;
 	struct tee_mmap_region *map = static_memory_map;
 	const struct core_mmu_phys_mem __maybe_unused *pmem;
+	paddr_t pa;
 
 	assert(!discovered_nsec_ddr_start);
 	assert(m && num_elems);
@@ -346,6 +349,10 @@ void core_mmu_set_discovered_nsec_ddr(struct core_mmu_phys_mem *start,
 
 	discovered_nsec_ddr_start = m;
 	discovered_nsec_ddr_nelems = num_elems;
+
+	if (ADD_OVERFLOW(m[num_elems - 1].addr, m[num_elems - 1].size - 1, &pa))
+		panic();
+	core_mmu_set_max_pa(pa);
 }
 
 static bool get_discovered_nsec_ddr(const struct core_mmu_phys_mem **start,
@@ -920,6 +927,14 @@ static void init_mem_map(struct tee_mmap_region *memory_map, size_t num_elems)
 			map->attr = core_mmu_type_to_attr(map->type);
 			va -= map->size;
 			va = ROUNDDOWN(va, map->region_size);
+			/*
+			 * Make sure that va is aligned with pa for
+			 * efficient pgdir mapping. Basically pa &
+			 * pgdir_mask should be == va & pgdir_mask
+			 */
+			if (map->size > 2 * CORE_MMU_PGDIR_SIZE)
+				va -= CORE_MMU_PGDIR_SIZE -
+					((map->pa - va) & CORE_MMU_PGDIR_MASK);
 			map->va = va;
 		}
 	} else {
@@ -937,6 +952,14 @@ static void init_mem_map(struct tee_mmap_region *memory_map, size_t num_elems)
 #endif
 			map->attr = core_mmu_type_to_attr(map->type);
 			va = ROUNDUP(va, map->region_size);
+			/*
+			 * Make sure that va is aligned with pa for
+			 * efficient pgdir mapping. Basically pa &
+			 * pgdir_mask should be == va & pgdir_mask
+			 */
+			if (map->size > 2 * CORE_MMU_PGDIR_SIZE)
+				va += (map->pa - va) & CORE_MMU_PGDIR_MASK;
+
 			map->va = va;
 			va += map->size;
 		}
@@ -1436,6 +1459,7 @@ TEE_Result core_mmu_map_pages(vaddr_t vstart, paddr_t *pages, size_t num_pages,
 	struct tee_mmap_region *mm;
 	unsigned int idx;
 	uint32_t old_attr;
+	uint32_t exceptions;
 	vaddr_t vaddr = vstart;
 	size_t i;
 	bool secure;
@@ -1446,6 +1470,8 @@ TEE_Result core_mmu_map_pages(vaddr_t vstart, paddr_t *pages, size_t num_pages,
 
 	if (vaddr & SMALL_PAGE_MASK)
 		return TEE_ERROR_BAD_PARAMETERS;
+
+	exceptions = mmu_lock();
 
 	mm = find_map_by_va((void *)vaddr);
 	if (!mm || !va_is_in_map(mm, vaddr + num_pages * SMALL_PAGE_SIZE - 1))
@@ -1489,9 +1515,12 @@ TEE_Result core_mmu_map_pages(vaddr_t vstart, paddr_t *pages, size_t num_pages,
 	 * guaranteed that there's no valid mapping in this range.
 	 */
 	dsb_ishst();
+	mmu_unlock(exceptions);
 
 	return TEE_SUCCESS;
 err:
+	mmu_unlock(exceptions);
+
 	if (i)
 		core_mmu_unmap_pages(vstart, i);
 
@@ -1504,6 +1533,9 @@ void core_mmu_unmap_pages(vaddr_t vstart, size_t num_pages)
 	struct tee_mmap_region *mm;
 	size_t i;
 	unsigned int idx;
+	uint32_t exceptions;
+
+	exceptions = mmu_lock();
 
 	mm = find_map_by_va((void *)vstart);
 	if (!mm || !va_is_in_map(mm, vstart + num_pages * SMALL_PAGE_SIZE - 1))
@@ -1523,6 +1555,8 @@ void core_mmu_unmap_pages(vaddr_t vstart, size_t num_pages)
 		core_mmu_set_entry(&tbl_info, idx, 0, 0);
 	}
 	tlbi_all();
+
+	mmu_unlock(exceptions);
 }
 
 void core_mmu_populate_user_map(struct core_mmu_table_info *dir_info,
@@ -1628,6 +1662,41 @@ bool core_mmu_add_mapping(enum teecore_memtypes type, paddr_t addr, size_t len)
 	dsb_ishst();
 
 	return true;
+}
+
+unsigned int asid_alloc(void)
+{
+	uint32_t exceptions = cpu_spin_lock_xsave(&g_asid_spinlock);
+	unsigned int r;
+	int i;
+
+	bit_ffc(g_asid, MMU_NUM_ASID_PAIRS, &i);
+	if (i == -1) {
+		r = 0;
+	} else {
+		bit_set(g_asid, i);
+		r = (i + 1) * 2;
+	}
+
+	cpu_spin_unlock_xrestore(&g_asid_spinlock, exceptions);
+	return r;
+}
+
+void asid_free(unsigned int asid)
+{
+	uint32_t exceptions = cpu_spin_lock_xsave(&g_asid_spinlock);
+
+	/* Only even ASIDs are supposed to be allocated */
+	assert(!(asid & 1));
+
+	if (asid) {
+		int i = (asid - 1) / 2;
+
+		assert(i < MMU_NUM_ASID_PAIRS && bit_test(g_asid, i));
+		bit_clear(g_asid, i);
+	}
+
+	cpu_spin_unlock_xrestore(&g_asid_spinlock, exceptions);
 }
 
 static bool arm_va2pa_helper(void *va, paddr_t *pa)

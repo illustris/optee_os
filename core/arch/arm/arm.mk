@@ -59,6 +59,10 @@ endif
 # Addresses CVE-2017-5715 (aka Meltdown) known to affect Arm Cortex-A75
 CFG_CORE_UNMAP_CORE_AT_EL0 ?= y
 
+# Initialize PMCR.DP to 1 to prohibit cycle counting in secure state, and
+# save/restore PMCR during world switch.
+CFG_SM_NO_CYCLE_COUNTING ?= y
+
 ifeq ($(CFG_ARM32_core),y)
 # Configration directive related to ARMv7 optee boot arguments.
 # CFG_PAGEABLE_ADDR: if defined, forces pageable data physical address.
@@ -77,8 +81,8 @@ endif
 arm64-platform-cppflags += -DARM64=1 -D__LP64__=1
 arm32-platform-cppflags += -DARM32=1 -D__ILP32__=1
 
-platform-cflags-generic ?= -g -ffunction-sections -fdata-sections -pipe
-platform-aflags-generic ?= -g -pipe
+platform-cflags-generic ?= -ffunction-sections -fdata-sections -pipe
+platform-aflags-generic ?= -pipe
 
 arm32-platform-cflags-no-hard-float ?= -mfloat-abi=soft
 arm32-platform-cflags-hard-float ?= -mfloat-abi=hard -funsafe-math-optimizations
@@ -91,13 +95,23 @@ arm64-platform-cflags-hard-float ?=
 arm64-platform-cflags-generic ?= -mstrict-align
 
 ifeq ($(DEBUG),1)
-platform-cflags-optimization ?=  -O0
-else
-platform-cflags-optimization ?=  -Os
+# For backwards compatibility
+$(call force,CFG_CC_OPTIMIZE_FOR_SIZE,n)
+$(call force,CFG_DEBUG_INFO,y)
 endif
 
+CFG_CC_OPTIMIZE_FOR_SIZE ?= y
+ifeq ($(CFG_CC_OPTIMIZE_FOR_SIZE),y)
+platform-cflags-optimization ?= -Os
+else
+platform-cflags-optimization ?= -O0
+endif
+
+CFG_DEBUG_INFO ?= y
+ifeq ($(CFG_DEBUG_INFO),y)
 platform-cflags-debug-info ?= -g3
-platform-aflags-debug-info ?=
+platform-aflags-debug-info ?= -g
+endif
 
 core-platform-cflags += $(platform-cflags-optimization)
 core-platform-cflags += $(platform-cflags-generic)

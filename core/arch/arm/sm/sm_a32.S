@@ -2,29 +2,6 @@
 /*
  * Copyright (c) 2016, Linaro Limited
  * Copyright (c) 2014, STMicroelectronics International N.V.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include <arm32_macros.S>
@@ -40,7 +17,7 @@
 
 	.section .text.sm_asm
 
-FUNC sm_save_modes_regs , :
+FUNC sm_save_unbanked_regs , :
 UNWIND(	.fnstart)
 UNWIND(	.cantunwind)
 	/* User mode registers has to be saved from system mode */
@@ -67,13 +44,17 @@ UNWIND(	.cantunwind)
 	mrs	r2, spsr
 	stm	r0!, {r2, sp, lr}
 
+#ifdef CFG_SM_NO_CYCLE_COUNTING
+	read_pmcr r2
+	stm	r0!, {r2}
+#endif
 	cps	#CPSR_MODE_MON
 	bx	lr
 UNWIND(	.fnend)
-END_FUNC sm_save_modes_regs
+END_FUNC sm_save_unbanked_regs
 
 /* Restores the mode specific registers */
-FUNC sm_restore_modes_regs , :
+FUNC sm_restore_unbanked_regs , :
 UNWIND(	.fnstart)
 UNWIND(	.cantunwind)
 	/* User mode registers has to be saved from system mode */
@@ -100,10 +81,14 @@ UNWIND(	.cantunwind)
 	ldm	r0!, {r2, sp, lr}
 	msr	spsr_fsxc, r2
 
+#ifdef CFG_SM_NO_CYCLE_COUNTING
+	ldm	r0!, {r2}
+	write_pmcr r2
+#endif
 	cps	#CPSR_MODE_MON
 	bx	lr
 UNWIND(	.fnend)
-END_FUNC sm_restore_modes_regs
+END_FUNC sm_restore_unbanked_regs
 
 /*
  * stack_tmp is used as stack, the top of the stack is reserved to hold
@@ -134,7 +119,7 @@ UNWIND(	.cantunwind)
 
 	/* Save secure context */
 	add	r0, sp, #SM_CTX_SEC
-	bl	sm_save_modes_regs
+	bl	sm_save_unbanked_regs
 
 	/*
 	 * On FIQ exit we're restoring the non-secure context unchanged, on
@@ -150,7 +135,7 @@ UNWIND(	.cantunwind)
 
 	/* Restore non-secure context */
 	add	r0, sp, #SM_CTX_NSEC
-	bl	sm_restore_modes_regs
+	bl	sm_restore_unbanked_regs
 
 .sm_ret_to_nsec:
 	/*
@@ -235,7 +220,7 @@ UNWIND(	.cantunwind)
 
 	/* Save non-secure context */
 	add	r0, sp, #SM_CTX_NSEC
-	bl	sm_save_modes_regs
+	bl	sm_save_unbanked_regs
 	stm	r0!, {r8-r12}
 
 	/* Set FIQ entry */
@@ -244,7 +229,7 @@ UNWIND(	.cantunwind)
 
 	/* Restore secure context */
 	add	r0, sp, #SM_CTX_SEC
-	bl	sm_restore_modes_regs
+	bl	sm_restore_unbanked_regs
 
 	add	sp, sp, #(SM_CTX_SEC + SM_SEC_CTX_MON_LR)
 
@@ -374,7 +359,11 @@ UNWIND(	.fnstart)
 	write_scr r0
 	isb
 #endif
-
+#ifdef CFG_SM_NO_CYCLE_COUNTING
+	read_pmcr r0
+	orr	r0, #PMCR_DP
+	write_pmcr r0
+#endif
 	msr	cpsr, r1
 
 #ifdef CFG_CORE_WORKAROUND_SPECTRE_BP
